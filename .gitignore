@@ -7,3 +7,5 @@
 */.coverage
 */.coverage.*
 */.DS_Store
+./build/*
+./nplm.egg-info/*
