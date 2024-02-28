@@ -1,0 +1,10 @@
+*/save/*
+*/__pycache__/*
+*/.pytest_cache/*
+*/.mypy_cache/*
+*/.mypy/*
+*/.tox/*
+*/.coverage
+*/.coverage.*
+*/.DS_Store
+*/
