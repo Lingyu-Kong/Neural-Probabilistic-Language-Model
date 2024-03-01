@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from nplm.data_loader.penn_loader import PennTreeBankLoader
+from nplm.models.lstm.lstm import LSTMModel
 from nplm.data_loader.vocab import Vocab, BOS, EOS
+from nplm.criterion.eval_criterion import PPL, WER
 import numpy as np
 from tqdm import tqdm
 import os
@@ -33,8 +35,8 @@ class NPLModel(object):
         criterion: nn.Module,
         epochs: int = 40,
         lr: float = 1.0,
-        weight_decay: float = 1e-5, 
-        momentum: float = 0.9,
+        lr_scheduler: bool = False,
+        val_data_loader: DataLoader = None,
         log_interval: int = 100,
     ):
         """
@@ -49,12 +51,14 @@ class NPLModel(object):
             momentum (float): Momentum for the optimizer.
             log_interval (int): Log interval for the training.
         """
-        optimizer = optimizer(self.logit_model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+        optimizer = optimizer(self.logit_model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
         self.logit_model.train()
+        
         for epoch in range(epochs):
             print(f"Epoch: {epoch}")
             loss_list = []
-            pbar = tqdm(data_loader, desc="Training Loss: ....")
+            pbar = tqdm(data_loader, desc="Training Loss: ...., Validation PPL: ...., Validation WER: ....")
             for num_batch, data_batch in enumerate(pbar):
                 optimizer.zero_grad()
                 batch_input, batch_target, _ = PennTreeBankLoader.process_batch(data_batch, sep_target=True)
@@ -62,7 +66,6 @@ class NPLModel(object):
                 batch_output = self.logit_model(batch_input)
                 loss = criterion(batch_output, batch_target)
                 loss.backward()
-                optimizer.step()
                 ## `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs
                 torch.nn.utils.clip_grad_norm_(self.logit_model.parameters(), 0.25)
                 optimizer.step()
@@ -70,8 +73,16 @@ class NPLModel(object):
                 loss_list.append(loss.item())
                 
                 if (num_batch % log_interval == 0 and num_batch > 0) or (num_batch == len(data_loader) - 1):
-                    cur_loss = np.mean(loss_list)
-                    pbar.set_description(f"Training Loss: {cur_loss:.2f}")
+                    if num_batch == len(data_loader) - 1:
+                        cur_loss = np.mean(loss_list)
+                        ppl = self.evaluate(val_data_loader, PPL())
+                        wer = self.evaluate(val_data_loader, WER())
+                        pbar.set_description(f"Training Loss: {cur_loss:.2f}, Validation PPL: {ppl:.2f}, Validation WER: {wer:.2f}")
+                    else:
+                        cur_loss = np.mean(loss_list)
+                        pbar.set_description(f"Training Loss: {cur_loss:.2f}, Validation PPL: ...., Validation WER: ....")
+            if lr_scheduler:             
+                scheduler.step(ppl)
         
     def evaluate(
         self,
@@ -93,7 +104,7 @@ class NPLModel(object):
                 batch_output = self.logit_model(batch_input)
                 loss = criterion(batch_output, batch_target)
                 loss_list.append(loss.item())
-                
+        self.logit_model.train()
         return np.mean(loss_list)
     
     def generate(
@@ -142,92 +153,3 @@ class NPLModel(object):
         logit_model = LSTMModel.load(os.path.join(path, "model.pth"))
         vocab = Vocab.load(os.path.join(path, "vocab.pkl"))
         return NPLModel(logit_model=logit_model, vocab=vocab, device=device)
-        
-                
-                
-
-from nplm.models.lstm.lstm import LSTMModel
-from nplm.data_loader.penn_loader import PennTreeBank, PennTreeBankLoader
-from nplm.criterion.train_criterion import CrossEntropyLoss, SimpleNCELoss
-from nplm.criterion.eval_criterion import PPL, WER
-  
-if __name__ == "__main__":
-    vocab = Vocab(
-        files=["./data_loader/data/penn_train.txt"],
-    )
-    print("Length of the Vocabulary: ", len(vocab))
-    train_dataset = PennTreeBank(
-        file_path="./data_loader/data/penn_train.txt",
-        vocab=vocab,
-    )
-    train_dataloader = PennTreeBankLoader(
-        dataset=train_dataset,
-        vocab=vocab,
-        batch_size=256,
-        shuffle=True,
-    )
-    
-    lstm = LSTMModel(
-        vocab_size=len(vocab),
-        embedding_dim=128,
-        hidden_dim=128,
-        num_layers=2,
-        dropout=0.1,
-    )
-    nplmodel = NPLModel(
-        logit_model=lstm,
-        vocab=vocab,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    )
-    
-    # nplmodel.train(
-    #     data_loader=train_dataloader,
-    #     optimizer=torch.optim.SGD,
-    #     criterion=CrossEntropyLoss(),
-    #     epochs=50,
-    #     lr=1.0,
-    #     weight_decay=1e-5,
-    #     momentum=0.9,
-    # )
-    
-    nplmodel.train(
-        data_loader=train_dataloader,
-        optimizer=torch.optim.SGD,
-        criterion=SimpleNCELoss(k=1000, vocab=vocab),
-        epochs=50,
-        lr=1.0,
-        weight_decay=1e-5,
-        momentum=0.9,
-    )
-    
-    test_dataset = PennTreeBank(
-        file_path="./data_loader/data/penn_test.txt",
-        vocab=vocab,
-    )
-    test_dataloader = PennTreeBankLoader(
-        dataset=test_dataset,
-        vocab=vocab,
-        batch_size=256,
-        shuffle=True,
-    )
-    ppl_loss = nplmodel.evaluate(
-        data_loader=test_dataloader,
-        criterion=PPL(),
-    )
-    print(f"Perplexity Loss: {ppl_loss:.2f}")
-    wer_loss = nplmodel.evaluate(
-        data_loader=test_dataloader,
-        criterion=WER(),
-    )
-    print(f"Word Error Rate Loss: {wer_loss:.2f}")
-    
-    assert vocab.query("we") != -1
-    output_string = nplmodel.generate(start_token="we", max_length=100)
-    print(output_string)
-    
-    os.makedirs("./save", exist_ok=True)
-    nplmodel.save(path="./save")
-    nplmodel = NPLModel.load(path="./save")
-    assert vocab.query("he") != -1
-    output_string = nplmodel.generate(start_token="he", max_length=100)
-    print(output_string)

@@ -37,7 +37,10 @@ class Vocab(object):
                 if word not in [UNK, BOS, EOS]:
                     self.index2word.append(word)
         self.word2index = {word: idx for idx, word in enumerate(self.index2word)}
-        self.index2freq = [counter.get(word, unk_freq) for word in self.index2word]
+        self.index2freq = [counter[word] for word in self.index2word]
+        self.index2freq[0] += unk_freq
+        self.index2freq[1] = counter[BOS]
+        self.index2freq[2] = counter[EOS]
         
         assert len(self.index2word) == len(self.word2index) == len(self.index2freq)
         
